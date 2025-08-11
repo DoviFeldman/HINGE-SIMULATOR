@@ -1,0 +1,429 @@
+
+
+Love it — we can add:
+- A “Lock Rod” tool to toggle whether a rod enforces a fixed length (lock to its current length when turned on).
+- A “Measure” tool to show a length label on any rod.
+- Drag-solve with constraints + tracing, so you can drag mechanisms (without motors) and still keep rod lengths and trace paths.
+
+Below are copy-paste patches and where to put them.
+
+To your code assistant (the one who will modify files)
+We’ll touch index.html, style.css, and script.js.
+
+1) index.html — add new tools in the toolbar and update the footer help line
+- Where: Inside the existing Tools group (the one that holds Select, Joint, Rod, Pin, Motor, Trace, Delete).
+- Do this: Add these two buttons after the Rod button (or anywhere in the same group you prefer).
+
+HTML to insert inside the Tools group
+```html
+<button data-tool="lockRod" class="tool" title="Toggle Lock Length on Rod (L)">🔒 Lock Rod</button>
+<button data-tool="measure" class="tool" title="Toggle Measurement on Rod (D)">📐 Measure</button>
+```
+
+- Optional but recommended: Update the footer help text to mention the new tools and keyboard shortcuts.
+Find the footer text:
+Tools: Select/Drag, Joint, Rod, Pin, Motor, Trace, Delete. Left-click to use tools. Right-drag to pan. Wheel to zoom. 
+Keyboard: V J R P M T (switch tools), Space+drag to pan, +/- to zoom, Del to delete, Esc to cancel, Space to Play/Pause.
+
+Replace it with:
+```html
+Tools: Select/Drag, Joint, Rod, Lock Rod, Measure, Pin, Motor, Trace, Delete. Left-click to use tools. Right-drag to pan. Wheel to zoom.
+Keyboard: V J R L D P M T (switch tools), Space+drag to pan, +/- to zoom, Del to delete, Esc to cancel, Space to Play/Pause.
+```
+
+2) style.css — cursors for new tools
+Add these lines anywhere near the existing cursor tool rules:
+```css
+body.tool-lockRod #canvas { cursor: pointer; }
+body.tool-measure #canvas { cursor: crosshair; }
+```
+
+3) script.js — code changes
+Summary of what’s changing:
+- Edges now carry locked and measure properties.
+- New tool modes: lockRod and measure.
+- Constraint solver now honors e.locked; unlocked rods render but don’t constrain.
+- Add projectConstraints() for interactive drag-solve when paused.
+- Traces now also record while dragging (not only when playing).
+- Export/Import now persists locked and measure flags.
+
+Make these edits:
+
+A) Add “lockRod” and “measure” tool status strings
+Find the updateStatus() switch and add:
+```javascript
+      case 'lockRod':
+        txt = 'Lock Rod: click a rod to toggle its length lock. If turning ON, locks to its current length.';
+        break;
+      case 'measure':
+        txt = 'Measure: click a rod to toggle its length label.';
+        break;
+```
+
+B) Edge structure: default locked, allow measurement flag
+Replace the addEdge function with this version (it just adds two fields: locked and measure):
+```javascript
+function addEdge(a, b) {
+  if (a === b) return null;
+  if (a < 0 || b < 0 || a >= state.nodes.length || b >= state.nodes.length) return null;
+  // prevent duplicates
+  if (state.edges.some(e => (e.a === a && e.b === b) || (e.a === b && e.b === a))) return null;
+  const na = state.nodes[a], nb = state.nodes[b];
+  const len = Math.hypot(nb.x - na.x, nb.y - na.y);
+  if (len <= 0.0001) return null;
+  const e = { a, b, len, locked: true, measure: false };
+  state.edges.push(e);
+  autosave();
+  return state.edges.length - 1;
+}
+```
+
+C) Only enforce constraints for locked rods
+Inside step(dt), in the constraint loop over edges, add the guard:
+Find this loop:
+```javascript
+for (const e of state.edges) {
+  const i = e.a, j = e.b;
+  // ...
+```
+Change it to:
+```javascript
+for (const e of state.edges) {
+  if (!e.locked) continue; // only satisfy locked rods
+  const i = e.a, j = e.b;
+  // ...
+```
+
+D) Factor trace recording into a function and reuse during drag
+1) Add this helper somewhere near other helpers (e.g., under Simulation section):
+```javascript
+function recordTraces() {
+  for (const n of state.nodes) {
+    if (!n.trace) continue;
+    const pts = n.tracePts;
+    if (pts.length === 0 || Math.hypot(n.x - pts[pts.length - 1].x, n.y - pts[pts.length - 1].y) > 0.5) {
+      pts.push({ x: n.x, y: n.y });
+      if (pts.length > 4000) pts.shift();
+    }
+  }
+}
+```
+
+2) In step(dt), replace the existing “Add to traces” loop with a call to recordTraces():
+Find:
+```javascript
+// Add to traces
+for (const n of nodes) {
+  if (!n.trace) continue;
+  const pts = n.tracePts;
+  if (pts.length === 0 || (Math.hypot(n.x - pts[pts.length-1].x, n.y - pts[pts.length-1].y) > 0.5)) {
+    pts.push({ x: n.x, y: n.y });
+    if (pts.length > 4000) pts.shift();
+  }
+}
+```
+Replace it with:
+```javascript
+recordTraces();
+```
+
+E) Add a constraint projector for interactive dragging
+Add this function (place it near other simulation helpers):
+```javascript
+function projectConstraints(iters, extraLockedIndices = []) {
+  const nodes = state.nodes;
+  const locked = new Array(nodes.length).fill(false);
+  const extra = new Set(extraLockedIndices);
+
+  // Pinned nodes are locked
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].pinned) locked[i] = true;
+  }
+
+  // Motorized nodes are locked to their current motor position,
+  // unless we're actively dragging that node.
+  for (const m of state.motors) {
+    if (extra.has(m.node)) continue;
+    const a = nodes[m.anchor];
+    const n = nodes[m.node];
+    const theta = m.theta0 + m.speed * state.time;
+    n.x = a.x + m.radius * Math.cos(theta);
+    n.y = a.y + m.radius * Math.sin(theta);
+    locked[m.node] = true;
+  }
+
+  // Satisfy only locked edges
+  for (let k = 0; k < iters; k++) {
+    for (const e of state.edges) {
+      if (!e.locked) continue;
+      const i = e.a, j = e.b;
+      const a = nodes[i], b = nodes[j];
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let dist = Math.hypot(dx, dy);
+      if (dist < 1e-9) { dx = 1e-3; dy = 0; dist = 1e-3; }
+      const diff = (dist - e.len) / dist;
+      const invA = locked[i] ? 0 : 1;
+      const invB = locked[j] ? 0 : 1;
+      const wsum = invA + invB; if (wsum === 0) continue;
+      const corrx = dx * diff, corry = dy * diff;
+      if (invA) { a.x += corrx * (invA / wsum); a.y += corry * (invA / wsum); }
+      if (invB) { b.x -= corrx * (invB / wsum); b.y -= corry * (invB / wsum); }
+    }
+  }
+}
+```
+
+F) While dragging a node, solve constraints and record traces
+In onMouseMove(e), after we update the dragged node position, add two calls.
+
+Find this block:
+```javascript
+if (state.draggingNode != null) {
+  const idx = state.draggingNode;
+  const n = state.nodes[idx];
+  n.x = pos.x - state.dragOffset.x;
+  n.y = pos.y - state.dragOffset.y;
+  n.px = n.x;
+  n.py = n.y;
+}
+```
+
+Immediately after the n.py assignment, add:
+```javascript
+  // Enforce locked rods while dragging (interactive IK-like behavior)
+  projectConstraints(state.iters, [idx]);
+  // Record traces even when paused and dragging
+  recordTraces();
+```
+
+G) New tool behaviors: lockRod and measure
+In onMouseDown(e), add two new cases to the switch (place them near the others like pin/motor/trace/delete):
+
+```javascript
+case 'lockRod': {
+  if (overEdge != null) {
+    const e = state.edges[overEdge];
+    if (!e.locked) {
+      // Turning ON: lock to current length
+      const a = state.nodes[e.a], b = state.nodes[e.b];
+      e.len = Math.hypot(b.x - a.x, b.y - a.y);
+      e.locked = true;
+    } else {
+      // Turning OFF: leave length stored but stop constraining
+      e.locked = false;
+    }
+    autosave();
+  }
+  break;
+}
+
+case 'measure': {
+  if (overEdge != null) {
+    const e = state.edges[overEdge];
+    e.measure = !e.measure;
+    autosave();
+  }
+  break;
+}
+```
+
+H) Draw locked vs unlocked rods and measurement labels
+1) In the edge rendering loop, set dashed style for unlocked rods and draw measurement labels for edges with e.measure = true.
+
+Find the current “Draw edges (rods)” loop:
+```javascript
+ctx.lineWidth = 2;
+for (let i = 0; i < state.edges.length; i++) {
+  const e = state.edges[i];
+  const a = state.nodes[e.a], b = state.nodes[e.b];
+  const sa = worldToScreen(a.x, a.y);
+  const sb = worldToScreen(b.x, b.y);
+  ctx.beginPath();
+  ctx.moveTo(sa.x, sa.y);
+  ctx.lineTo(sb.x, sb.y);
+  ctx.strokeStyle = '#77a1ff';
+  ctx.stroke();
+}
+```
+
+Replace it with:
+```javascript
+ctx.lineWidth = 2;
+for (let i = 0; i < state.edges.length; i++) {
+  const e = state.edges[i];
+  const a = state.nodes[e.a], b = state.nodes[e.b];
+  const sa = worldToScreen(a.x, a.y);
+  const sb = worldToScreen(b.x, b.y);
+
+  ctx.beginPath();
+  ctx.moveTo(sa.x, sa.y);
+  ctx.lineTo(sb.x, sb.y);
+
+  if (e.locked) {
+    ctx.setLineDash([]);
+    ctx.strokeStyle = '#77a1ff';
+  } else {
+    ctx.setLineDash([6, 6]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  if (e.measure) drawEdgeMeasure(e);
+}
+```
+
+2) Add this helper function (place it near rendering helpers):
+```javascript
+function drawEdgeMeasure(e) {
+  const a = state.nodes[e.a], b = state.nodes[e.b];
+  const midx = (a.x + b.x) / 2, midy = (a.y + b.y) / 2;
+  const s = worldToScreen(midx, midy);
+  const length = Math.hypot(b.x - a.x, b.y - a.y);
+  const text = `${length.toFixed(1)}`;
+
+  ctx.save();
+  ctx.font = '12px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  const pad = 4;
+  const w = ctx.measureText(text).width + pad * 2;
+  const h = 16;
+  const x = s.x - w / 2;
+  const y = s.y - h / 2 - 12; // offset above rod
+
+  // Background box
+  ctx.fillStyle = 'rgba(23, 26, 43, 0.9)';
+  ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = 'rgba(43, 49, 88, 1)';
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+  // Text
+  ctx.fillStyle = '#e8eaf5';
+  ctx.fillText(text, s.x, s.y - 12);
+
+  ctx.restore();
+}
+```
+
+I) Keyboard shortcuts for new tools
+Find the window.addEventListener('keydown', ...) block and add:
+```javascript
+if (e.key.toLowerCase() === 'l') setTool('lockRod');
+if (e.key.toLowerCase() === 'd') setTool('measure');
+```
+
+J) Persist locked and measure in Export/Import/Autosave
+1) In exportJSON(), change the edges mapping:
+Find:
+```javascript
+edges: state.edges.map(e => ({ a: e.a, b: e.b, len: e.len })),
+```
+Replace with:
+```javascript
+edges: state.edges.map(e => ({ a: e.a, b: e.b, len: e.len, locked: e.locked, measure: e.measure })),
+```
+
+2) In autosave(), change the edges mapping similarly:
+Find:
+```javascript
+edges: state.edges.map(e => ({ a:e.a, b:e.b, len:e.len })),
+```
+Replace with:
+```javascript
+edges: state.edges.map(e => ({ a:e.a, b:e.b, len:e.len, locked: e.locked, measure: e.measure })),
+```
+
+3) In loadFromData(data), set locked and measure on restored edges.
+Currently it calls addEdge(e.a, e.b) then (re)sets lengths. After the existing “Reset edge lengths to provided lengths if any” block, add:
+
+```javascript
+// Also restore locked/measure flags if present
+if (data.edges) {
+  for (let i = 0; i < data.edges.length && i < state.edges.length; i++) {
+    const src = data.edges[i];
+    if (typeof src.locked !== 'undefined') state.edges[i].locked = !!src.locked;
+    if (typeof src.measure !== 'undefined') state.edges[i].measure = !!src.measure;
+  }
+}
+```
+
+Done. That’s everything.
+
+How it works now
+- Lock Rod tool (L): Click any rod to toggle its lock. When turning ON, the rod’s length locks to its current length. When OFF, the rod becomes visual-only (dashed) and won’t constrain motion.
+- Measure tool (D): Click any rod to toggle a length label at its midpoint.
+- Drag solving + tracing: With Play paused, simply drag joints in Select mode. Locked rods will hold their length and pull the rest of the mechanism via an IK-like solve. If a joint has tracing enabled, its path will record during drag as well.
+- Motors: If a node is motor-driven, you can still drag the rest of the mechanism; if you try to drag the motor node itself, the motor will keep it on its circle unless you pause and remove the motor or drag other nodes.
+
+Want a small inspector to edit a rod’s exact locked length or set units (mm/in)? I can add a side panel next.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
