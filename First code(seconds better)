@@ -1,0 +1,1093 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hinge Simulator</title>
+  <style>
+        /* CSS goes here */
+        
+        :root {
+  --bg: #0f1220;
+  --panel: #171a2b;
+  --fg: #e8eaf5;
+  --muted: #9aa3c7;
+  --accent: #6ea8fe;
+  --accent2: #8cffc1;
+  --warn: #ff8a8a;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+#canvas {
+  position: absolute;
+  inset: 48px 0 28px 0;
+  width: 100%;
+  height: calc(100% - 76px);
+  display: block;
+  cursor: crosshair;
+}
+
+.topbar {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: 48px;
+  background: var(--panel);
+  border-bottom: 1px solid #252a48;
+  display: flex;
+  align-items: center;
+  padding: 6px 10px;
+  gap: 10px;
+  z-index: 10;
+}
+
+.topbar .brand {
+  font-weight: 700;
+  color: var(--accent2);
+  margin-right: 10px;
+}
+
+.group {
+  display: inline-flex;
+  align-items: center;
+  background: #12162a;
+  border: 1px solid #252a48;
+  border-radius: 8px;
+  padding: 4px;
+  gap: 4px;
+}
+
+button, .inline {
+  background: #1a1f37;
+  color: var(--fg);
+  border: 1px solid #2b3158;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+button:hover { background: #222849; }
+button.active { background: var(--accent); color: #081021; border-color: #6ea8fe; }
+
+.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+input[type="range"] {
+  accent-color: var(--accent);
+}
+
+#status {
+  position: fixed;
+  left: 10px; top: 52px;
+  color: var(--muted);
+  font-size: 12px;
+  z-index: 11;
+  user-select: none;
+}
+
+.footer {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  height: 28px;
+  background: var(--panel);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-top: 1px solid #252a48;
+  font-size: 12px;
+  z-index: 10;
+}
+
+/* Tool cursor hints */
+body.tool-select #canvas { cursor: default; }
+body.tool-addJoint #canvas { cursor: crosshair; }
+body.tool-addRod #canvas { cursor: crosshair; }
+body.tool-pin #canvas { cursor: pointer; }
+body.tool-motor #canvas { cursor: alias; }
+body.tool-delete #canvas { cursor: not-allowed; }
+body.tool-trace #canvas { cursor: cell; }
+        
+        
+    </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🔩 Hinge Simulator</div>
+
+    <div class="group">
+      <button id="btnPlay" title="Play/Pause">▶️ Play</button>
+      <button id="btnStep" title="Step one frame">⏭ Step</button>
+      <label class="inline">
+        Speed
+        <input id="speed" type="range" min="0.1" max="3" step="0.1" value="1" />
+        <span id="speedVal">1.0x</span>
+      </label>
+    </div>
+
+    <div class="group">
+      <button data-tool="select" class="tool active" title="Select/Drag (V)">🖱 Select</button>
+      <button data-tool="addJoint" class="tool" title="Add Joint (J)">🟡 Joint</button>
+      <button data-tool="addRod" class="tool" title="Add Rod (R)">📏 Rod</button>
+      <button data-tool="pin" class="tool" title="Pin/Unpin (P)">📌 Pin</button>
+      <button data-tool="motor" class="tool" title="Add Motor (M)">⚙️ Motor</button>
+      <button data-tool="trace" class="tool" title="Toggle Trace on Joint (T)">🧵 Trace</button>
+      <button data-tool="delete" class="tool" title="Delete (Del)">🗑 Delete</button>
+    </div>
+
+    <div class="group">
+      <button id="btnClearTraces" title="Clear all traces">🧹 Clear Traces</button>
+      <button id="btnNew" title="Clear scene">🆕 New</button>
+      <button id="btnSample" title="Load sample">📦 Sample</button>
+      <button id="btnExport" title="Export JSON">💾 Export</button>
+      <button id="btnImport" title="Import JSON">📥 Import</button>
+      <input id="importFile" type="file" accept="application/json" style="display:none" />
+      <button id="btnResetView" title="Reset view">🧭 Reset View</button>
+    </div>
+  </header>
+
+  <div id="status"></div>
+
+  <canvas id="canvas"></canvas>
+
+  <footer class="footer">
+    <div>
+      Tools: Select/Drag, Joint, Rod, Pin, Motor, Trace, Delete. Left-click to use tools. Right-drag to pan. Wheel to zoom. 
+      Keyboard: V J R P M T (switch tools), Space+drag to pan, +/- to zoom, Del to delete, Esc to cancel, Space to Play/Pause.
+    </div>
+  </footer>
+
+  <script>  
+  
+  
+  /* Hinge Simulator - 2D linkage builder with PBD constraints.
+   Features: joints, rods, pins, motorized rotation, tracing, pan/zoom, export/import.
+*/
+
+(() => {
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const dpr = Math.max(1, window.devicePixelRatio || 1);
+
+  const btnPlay = document.getElementById('btnPlay');
+  const btnStep = document.getElementById('btnStep');
+  const speedSlider = document.getElementById('speed');
+  const speedVal = document.getElementById('speedVal');
+  const statusEl = document.getElementById('status');
+
+  const toolButtons = Array.from(document.querySelectorAll('button.tool'));
+
+  const btnClearTraces = document.getElementById('btnClearTraces');
+  const btnNew = document.getElementById('btnNew');
+  const btnSample = document.getElementById('btnSample');
+  const btnExport = document.getElementById('btnExport');
+  const btnImport = document.getElementById('btnImport');
+  const importFile = document.getElementById('importFile');
+  const btnResetView = document.getElementById('btnResetView');
+
+  const state = {
+    nodes: [],   // {x,y, px,py, pinned, trace, tracePts:[], selected}
+    edges: [],   // {a, b, len}
+    motors: [],  // {anchor, node, speed, theta0, radius}
+    time: 0,
+    isPlaying: false,
+    speed: 1.0,
+    dt: 1/60,
+    iters: 28,
+    damping: 0.999,
+    gravity: {x: 0, y: 0}, // no gravity default
+    tool: 'select',
+    selection: { node: null, edge: null, motor: null },
+    addRodFirst: null,
+    addMotorAnchor: null,
+    draggingNode: null,
+    dragging: false,
+    dragOffset: {x:0, y:0},
+    pan: {x: 0, y: 0},
+    scale: 1,
+    mouse: {x:0, y:0, sx:0, sy:0, down:false, button:0},
+    panning: false,
+    keys: {}
+  };
+
+  function setCanvasSize() {
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.floor(rect.width * dpr);
+    canvas.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(1,0,0,1,0,0);
+    ctx.scale(dpr, dpr);
+  }
+  window.addEventListener('resize', setCanvasSize);
+
+  function setTool(tool) {
+    state.tool = tool;
+    document.body.className = tool-${tool};
+    toolButtons.forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
+    state.addRodFirst = null;
+    state.addMotorAnchor = null;
+    updateStatus();
+  }
+
+  function worldToScreen(x, y) {
+    return {
+      x: (x * state.scale + state.pan.x),
+      y: (y * state.scale + state.pan.y)
+    };
+  }
+  function screenToWorld(sx, sy) {
+    return {
+      x: (sx - state.pan.x) / state.scale,
+      y: (sy - state.pan.y) / state.scale
+    };
+  }
+
+  function updateStatus() {
+    let txt = '';
+    switch (state.tool) {
+      case 'select':
+        txt = 'Select: click/drag joints. Right-drag to pan. Wheel to zoom.';
+        break;
+      case 'addJoint':
+        txt = 'Add Joint: click anywhere to add a joint.';
+        break;
+      case 'addRod':
+        if (state.addRodFirst == null) txt = 'Add Rod: click first joint...';
+        else txt = 'Add Rod: ...now click second joint to connect.';
+        break;
+      case 'pin':
+        txt = 'Pin: click a joint to toggle pinned (anchor).';
+        break;
+      case 'motor':
+        if (state.addMotorAnchor == null) txt = 'Motor: click anchor joint (ideally pinned)...';
+        else txt = 'Motor: ...now click the joint to rotate around anchor.';
+        break;
+      case 'delete':
+        txt = 'Delete: click a joint (or a rod) to remove.';
+        break;
+      case 'trace':
+        txt = 'Trace: click a joint to toggle path tracing.';
+        break;
+    }
+    if (state.isPlaying) txt += '  Sim: RUNNING';
+    else txt += '  Sim: PAUSED';
+    statusEl.textContent = txt;
+  }
+
+  // Scene manipulation
+  function addNode(x, y, opts = {}) {
+    const n = {
+      x, y,
+      px: x, py: y,
+      pinned: !!opts.pinned,
+      trace: !!opts.trace,
+      tracePts: [],
+      selected: false,
+    };
+    state.nodes.push(n);
+    autosave();
+    return state.nodes.length - 1;
+  }
+
+  function addEdge(a, b) {
+    if (a === b) return null;
+    if (a < 0 || b < 0 || a >= state.nodes.length || b >= state.nodes.length) return null;
+    // prevent duplicates
+    if (state.edges.some(e => (e.a === a && e.b === b) || (e.a === b && e.b === a))) return null;
+    const na = state.nodes[a], nb = state.nodes[b];
+    const len = Math.hypot(nb.x - na.x, nb.y - na.y);
+    if (len <= 0.0001) return null;
+    const e = { a, b, len };
+    state.edges.push(e);
+    autosave();
+    return state.edges.length - 1;
+  }
+
+  function removeEdgeAtIndex(idx) {
+    if (idx == null || idx < 0 || idx >= state.edges.length) return;
+    state.edges.splice(idx, 1);
+    autosave();
+  }
+
+  function addMotor(anchor, node, speed = Math.PI/4) {
+    if (anchor === node) return null;
+    const a = state.nodes[anchor], n = state.nodes[node];
+    const dx = n.x - a.x, dy = n.y - a.y;
+    const radius = Math.hypot(dx, dy);
+    if (radius < 1e-6) return null;
+    const theta = Math.atan2(dy, dx);
+    const m = { anchor, node, speed, theta0: theta, radius };
+    state.motors.push(m);
+    autosave();
+    return state.motors.length - 1;
+  }
+
+  function removeNodeAtIndex(idx) {
+    if (idx == null || idx < 0 || idx >= state.nodes.length) return;
+    // Remove edges referencing this node
+    state.edges = state.edges.filter(e => e.a !== idx && e.b !== idx)
+      .map(e => ({
+        a: e.a > idx ? e.a - 1 : e.a,
+        b: e.b > idx ? e.b - 1 : e.b,
+        len: e.len
+      }));
+    // Remove motors touching this node
+    state.motors = state.motors.filter(m => m.anchor !== idx && m.node !== idx)
+      .map(m => ({
+        anchor: m.anchor > idx ? m.anchor - 1 : m.anchor,
+        node: m.node > idx ? m.node - 1 : m.node,
+        speed: m.speed, theta0: m.theta0, radius: m.radius
+      }));
+    state.nodes.splice(idx, 1);
+    autosave();
+  }
+
+  function removeMotorAtIndex(idx) {
+    if (idx == null || idx < 0 || idx >= state.motors.length) return;
+    state.motors.splice(idx, 1);
+    autosave();
+  }
+
+  function clearTraces() {
+    for (const n of state.nodes) n.tracePts = [];
+  }
+
+  function clearScene() {
+    state.nodes.length = 0;
+    state.edges.length = 0;
+    state.motors.length = 0;
+    state.addRodFirst = null;
+    state.addMotorAnchor = null;
+    state.selection = { node: null, edge: null, motor: null };
+    clearTraces();
+    autosave();
+  }
+
+  function resetView() {
+    state.pan.x = canvas.clientWidth * 0.5;
+    state.pan.y = canvas.clientHeight * 0.5;
+    state.scale = 1;
+  }
+
+  // Hit testing
+  function hitNode(mx, my, radiusPx = 10) {
+    const world = screenToWorld(mx, my);
+    const thresh = radiusPx / state.scale;
+    let best = null, bestDist = Infinity;
+    for (let i = 0; i < state.nodes.length; i++) {
+      const n = state.nodes[i];
+      const d = Math.hypot(world.x - n.x, world.y - n.y);
+      if (d < thresh && d < bestDist) {
+        bestDist = d;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  function distancePointToSegment(px, py, x1, y1, x2, y2) {
+    const vx = x2 - x1, vy = y2 - y1;
+    const wx = px - x1, wy = py - y1;
+    const c1 = vx*wx + vy*wy;
+    if (c1 <= 0) return Math.hypot(px - x1, py - y1);
+    const c2 = vx*vx + vy*vy;
+    if (c2 <= c1) return Math.hypot(px - x2, py - y2);
+    const b = c1 / c2;
+    const bx = x1 + b*vx, by = y1 + b*vy;
+    return Math.hypot(px - bx, py - by);
+  }
+
+  function hitEdge(mx, my, threshPx = 8) {
+    const world = screenToWorld(mx, my);
+    const thresh = threshPx / state.scale;
+    let best = null, bestDist = Infinity;
+    for (let i = 0; i < state.edges.length; i++) {
+      const e = state.edges[i];
+      const a = state.nodes[e.a], b = state.nodes[e.b];
+      const d = distancePointToSegment(world.x, world.y, a.x, a.y, b.x, b.y);
+      if (d < thresh && d < bestDist) {
+        bestDist = d;
+        best = i;
+      }
+    }
+    return best;
+  }
+
+  // Simulation
+  function step(dt) {
+    const nodes = state.nodes;
+    const locked = new Array(nodes.length).fill(false);
+
+    // Apply motor positions
+    state.time += dt * state.speed;
+    for (const m of state.motors) {
+      const a = nodes[m.anchor];
+      const n = nodes[m.node];
+      const theta = m.theta0 + m.speed * state.time;
+      const x = a.x + m.radius * Math.cos(theta);
+      const y = a.y + m.radius * Math.sin(theta);
+      n.x = x; n.y = y;
+      n.px = x; n.py = y; // lock velocity to motor
+      locked[m.node] = true;
+    }
+
+    // Integrate free nodes (Verlet)
+    const g = state.gravity;
+    const damp = state.damping;
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      if (n.pinned || locked[i]) {
+        n.px = n.x;
+        n.py = n.y;
+        continue;
+      }
+      const vx = (n.x - n.px) * damp;
+      const vy = (n.y - n.py) * damp;
+      n.px = n.x;
+      n.py = n.y;
+      n.x += vx + g.x * dt * dt;
+      n.y += vy + g.y * dt * dt;
+    }
+
+    // Satisfy constraints
+    const iters = state.iters;
+    for (let k = 0; k < iters; k++) {
+      // Edge distance constraints
+      for (const e of state.edges) {
+        const i = e.a, j = e.b;
+        const a = nodes[i], b = nodes[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let dist = Math.hypot(dx, dy);
+        if (dist < 1e-9) {
+          // jitter to avoid zero distance
+          const eps = 1e-3;
+          dx = eps; dy = 0; dist = eps;
+        }
+        const diff = (dist - e.len) / dist;
+        const invA = (a.pinned || locked[i]) ? 0 : 1;
+        const invB = (b.pinned || locked[j]) ? 0 : 1;
+        const wsum = invA + invB;
+        if (wsum === 0) continue;
+        const corrx = dx * diff;
+        const corry = dy * diff;
+        if (invA > 0) { a.x += corrx * (invA / wsum); a.y += corry * (invA / wsum); }
+        if (invB > 0) { b.x -= corrx * (invB / wsum); b.y -= corry * (invB / wsum); }
+      }
+
+      // Re-apply pins/motor locks to be safe
+      for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i];
+        if (n.pinned) { n.x = n.x; n.y = n.y; }
+      }
+      for (const m of state.motors) {
+        const a = nodes[m.anchor];
+        const n = nodes[m.node];
+        const theta = m.theta0 + m.speed * state.time;
+        n.x = a.x + m.radius * Math.cos(theta);
+        n.y = a.y + m.radius * Math.sin(theta);
+      }
+    }
+
+    // Add to traces
+    for (const n of nodes) {
+      if (!n.trace) continue;
+      const pts = n.tracePts;
+      if (pts.length === 0 || (Math.hypot(n.x - pts[pts.length-1].x, n.y - pts[pts.length-1].y) > 0.5)) {
+        pts.push({ x: n.x, y: n.y });
+        if (pts.length > 4000) pts.shift();
+      }
+    }
+  }
+
+  // Rendering
+  function drawGrid() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    ctx.save();
+    ctx.fillStyle = '#0b0e1b';
+    ctx.fillRect(0,0,w,h);
+    // grid in world space at 50 units
+    const spacing = 50;
+    const leftTop = screenToWorld(0,0);
+    const rightBottom = screenToWorld(w,h);
+    const x0 = Math.floor(leftTop.x / spacing) * spacing;
+    const y0 = Math.floor(leftTop.y / spacing) * spacing;
+    ctx.lineWidth = 1;
+    for (let x = x0; x <= rightBottom.x; x += spacing) {
+      const s = worldToScreen(x, 0).x;
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.beginPath();
+      ctx.moveTo(s, 0);
+      ctx.lineTo(s, h);
+      ctx.stroke();
+    }
+    for (let y = y0; y <= rightBottom.y; y += spacing) {
+      const s = worldToScreen(0, y).y;
+      ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+      ctx.beginPath();
+      ctx.moveTo(0, s);
+      ctx.lineTo(w, s);
+      ctx.stroke();
+    }
+    // axes
+    const origin = worldToScreen(0,0);
+    ctx.strokeStyle = 'rgba(110,168,254,0.5)';
+    ctx.beginPath();
+    ctx.moveTo(0, origin.y);
+    ctx.lineTo(w, origin.y);
+    ctx.moveTo(origin.x, 0);
+    ctx.lineTo(origin.x, h);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function render() {
+    setCanvasSize();
+    drawGrid();
+
+    // helpful transform guides? We'll draw in screen coords by converting per element.
+
+    // Draw traces
+    ctx.lineWidth = 1.5;
+    for (const n of state.nodes) {
+      if (!n.trace || n.tracePts.length < 2) continue;
+      ctx.beginPath();
+      for (let i = 0; i < n.tracePts.length; i++) {
+        const p = n.tracePts[i];
+        const s = worldToScreen(p.x, p.y);
+        if (i === 0) ctx.moveTo(s.x, s.y);
+        else ctx.lineTo(s.x, s.y);
+      }
+      ctx.strokeStyle = 'rgba(140,255,193,0.8)'; // accent2
+      ctx.stroke();
+    }
+
+    // Draw edges (rods)
+    ctx.lineWidth = 2;
+    for (let i = 0; i < state.edges.length; i++) {
+      const e = state.edges[i];
+      const a = state.nodes[e.a], b = state.nodes[e.b];
+      const sa = worldToScreen(a.x, a.y);
+      const sb = worldToScreen(b.x, b.y);
+      ctx.beginPath();
+      ctx.moveTo(sa.x, sa.y);
+      ctx.lineTo(sb.x, sb.y);
+      ctx.strokeStyle = '#77a1ff';
+      ctx.stroke();
+    }
+
+    // Draw motors
+    for (const m of state.motors) {
+      const a = state.nodes[m.anchor];
+      const n = state.nodes[m.node];
+      const sa = worldToScreen(a.x, a.y);
+      const sn = worldToScreen(n.x, n.y);
+      // circle path
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(255,210,110,0.6)';
+      ctx.lineWidth = 1;
+      ctx.arc(sa.x, sa.y, m.radius * state.scale, 0, Math.PI*2);
+      ctx.stroke();
+      // arrow
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(255,210,110,0.9)';
+      ctx.moveTo(sa.x, sa.y);
+      ctx.lineTo(sn.x, sn.y);
+      ctx.stroke();
+    }
+
+    // Draw nodes
+    for (let i = 0; i < state.nodes.length; i++) {
+      const n = state.nodes[i];
+      const s = worldToScreen(n.x, n.y);
+      const r = 6;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+      if (n.pinned) {
+        ctx.fillStyle = '#ff8a8a';
+        ctx.fill();
+        // pin base
+        ctx.beginPath();
+        ctx.moveTo(s.x - 8, s.y + 9);
+        ctx.lineTo(s.x + 8, s.y + 9);
+        ctx.strokeStyle = 'rgba(255,138,138,0.8)';
+        ctx.stroke();
+      } else if (n.trace) {
+        ctx.fillStyle = '#8cffc1';
+        ctx.fill();
+      } else {
+        ctx.fillStyle = '#e8eaf5';
+        ctx.fill();
+      }
+      if (n.selected) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#6ea8fe';
+        ctx.stroke();
+      }
+    }
+
+    requestAnimationFrame(tick);
+  }
+
+  function tick() {
+    if (state.isPlaying) {
+      step(state.dt);
+    }
+    render();
+  }
+
+  // Input handling
+  function onMouseDown(e) {
+    state.mouse.down = true;
+    state.mouse.button = e.button;
+    const rect = canvas.getBoundingClientRect();
+    state.mouse.sx = e.clientX - rect.left;
+    state.mouse.sy = e.clientY - rect.top;
+    const { sx, sy } = state.mouse;
+    const pos = screenToWorld(sx, sy);
+    state.mouse.x = pos.x;
+    state.mouse.y = pos.y;
+
+    const overNode = hitNode(sx, sy);
+    const overEdge = hitEdge(sx, sy);
+
+    if (e.button === 2 || state.keys['Space']) {
+      // Right button or space for panning
+      state.panning = true;
+      state.dragging = true;
+      state.dragStartPan = { x: state.pan.x, y: state.pan.y };
+      state.dragStart = { sx, sy };
+      return;
+    }
+
+    switch (state.tool) {
+      case 'select':
+        if (overNode != null) {
+          selectNode(overNode);
+          startDragNode(overNode, pos.x, pos.y);
+        } else {
+          selectNode(null);
+        }
+        break;
+
+      case 'addJoint':
+        addNode(pos.x, pos.y);
+        break;
+
+      case 'addRod':
+        if (overNode != null) {
+          if (state.addRodFirst == null) {
+            state.addRodFirst = overNode;
+          } else {
+            if (overNode !== state.addRodFirst) addEdge(state.addRodFirst, overNode);
+            state.addRodFirst = null;
+          }
+        }
+        break;
+
+      case 'pin':
+        if (overNode != null) {
+          const n = state.nodes[overNode];
+          n.pinned = !n.pinned;
+          autosave();
+        }
+        break;
+
+      case 'motor':
+        if (overNode != null) {
+          if (state.addMotorAnchor == null) {
+            state.addMotorAnchor = overNode;
+          } else {
+            if (overNode !== state.addMotorAnchor) {
+              addMotor(state.addMotorAnchor, overNode, Math.PI/4);
+            }
+            state.addMotorAnchor = null;
+          }
+        }
+        break;
+
+      case 'trace':
+        if (overNode != null) {
+          const n = state.nodes[overNode];
+          n.trace = !n.trace;
+          if (!n.trace) n.tracePts = [];
+          autosave();
+        }
+        break;
+
+      case 'delete':
+        if (overNode != null) {
+          removeNodeAtIndex(overNode);
+        } else if (overEdge != null) {
+          removeEdgeAtIndex(overEdge);
+        }
+        break;
+    }
+
+    updateStatus();
+  }
+
+  function onMouseMove(e) {
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const pos = screenToWorld(sx, sy);
+    state.mouse.sx = sx; state.mouse.sy = sy;
+    state.mouse.x = pos.x; state.mouse.y = pos.y;
+
+    if (state.panning && state.dragging) {
+      const dx = sx - state.dragStart.sx;
+      const dy = sy - state.dragStart.sy;
+      state.pan.x = state.dragStartPan.x + dx;
+      state.pan.y = state.dragStartPan.y + dy;
+      return;
+    }
+
+    if (state.draggingNode != null) {
+      const idx = state.draggingNode;
+      const n = state.nodes[idx];
+      n.x = pos.x - state.dragOffset.x;
+      n.y = pos.y - state.dragOffset.y;
+      n.px = n.x;
+      n.py = n.y;
+    }
+  }
+
+  function onMouseUp(e) {
+    state.mouse.down = false;
+    state.panning = false;
+    if (state.draggingNode != null) {
+      autosave();
+    }
+    state.draggingNode = null;
+    state.dragging = false;
+  }
+
+  function onWheel(e) {
+    e.preventDefault();
+    const factor = Math.exp(-e.deltaY * 0.0015);
+    const oldScale = state.scale;
+    const newScale = clamp(state.scale * factor, 0.2, 5);
+    // Zoom around mouse position
+    const rect = canvas.getBoundingClientRect();
+    const sx = e.clientX - rect.left;
+    const sy = e.clientY - rect.top;
+    const wx = (sx - state.pan.x) / oldScale;
+    const wy = (sy - state.pan.y) / oldScale;
+    state.scale = newScale;
+    state.pan.x = sx - wx * newScale;
+    state.pan.y = sy - wy * newScale;
+  }
+
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  function startDragNode(idx, wx, wy) {
+    const n = state.nodes[idx];
+    state.draggingNode = idx;
+    state.dragging = true;
+    state.dragOffset.x = wx - n.x;
+    state.dragOffset.y = wy - n.y;
+  }
+
+  function selectNode(idx) {
+    state.selection.node = idx;
+    for (let i = 0; i < state.nodes.length; i++) {
+      state.nodes[i].selected = (i === idx);
+    }
+  }
+
+  // UI wire-up
+  btnPlay.addEventListener('click', () => {
+    state.isPlaying = !state.isPlaying;
+    btnPlay.textContent = state.isPlaying ? '⏸ Pause' : '▶️ Play';
+    updateStatus();
+  });
+
+  btnStep.addEventListener('click', () => {
+    state.isPlaying = false;
+    btnPlay.textContent = '▶️ Play';
+    step(state.dt);
+    render();
+  });
+
+  speedSlider.addEventListener('input', () => {
+    state.speed = parseFloat(speedSlider.value);
+    speedVal.textContent = ${state.speed.toFixed(1)}x;
+  });
+
+  toolButtons.forEach(b => {
+    b.addEventListener('click', () => setTool(b.dataset.tool));
+  });
+
+  btnClearTraces.addEventListener('click', () => { clearTraces(); });
+  btnNew.addEventListener('click', () => {
+    if (confirm('Clear the scene?')) clearScene();
+  });
+  btnSample.addEventListener('click', () => {
+    if (confirm('Load sample mechanism? This will replace the current scene.')) {
+      loadSample();
+    }
+  });
+  btnExport.addEventListener('click', () => {
+    exportJSON();
+  });
+  btnImport.addEventListener('click', () => {
+    importFile.click();
+  });
+  importFile.addEventListener('change', onImportFile);
+  btnResetView.addEventListener('click', resetView);
+
+// Keyboard shortcuts
+  window.addEventListener('keydown', (e) => {
+    state.keys[e.key] = true;
+    if (e.key === ' ') { e.preventDefault(); btnPlay.click(); }
+    if (e.key === 'Escape') { state.addRodFirst = null; state.addMotorAnchor = null; updateStatus(); }
+    if (e.key.toLowerCase() === 'v') setTool('select');
+    if (e.key.toLowerCase() === 'j') setTool('addJoint');
+    if (e.key.toLowerCase() === 'r') setTool('addRod');
+    if (e.key.toLowerCase() === 'p') setTool('pin');
+    if (e.key.toLowerCase() === 'm') setTool('motor');
+    if (e.key.toLowerCase() === 't') setTool('trace');
+    if (e.key === 'Delete' || e.key === 'Backspace') setTool('delete');
+    if (e.key === '+' || e.key === '=') zoomAroundCenter(1.15);
+    if (e.key === '-') zoomAroundCenter(1/1.15);
+  });
+  
+  window.addEventListener('keyup', (e) => { delete state.keys[e.key]; });
+
+  function zoomAroundCenter(f) {
+    const cx = canvas.clientWidth / 2;
+    const cy = canvas.clientHeight / 2;
+    const oldScale = state.scale;
+    const newScale = clamp(oldScale * f, 0.2, 5);
+    const wx = (cx - state.pan.x) / oldScale;
+    const wy = (cy - state.pan.y) / oldScale;
+    state.scale = newScale;
+    state.pan.x = cx - wx * newScale;
+    state.pan.y = cy - wy * newScale;
+  }
+
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('mousedown', onMouseDown);
+  canvas.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
+  
+  canvas.addEventListener('wheel', onWheel, { passive: false });
+
+  // Persistence
+  function exportJSON() {
+    const data = {
+      nodes: state.nodes.map(n => ({
+        x: n.x, y: n.y, pinned: n.pinned, trace: n.trace
+      })),
+      edges: state.edges.map(e => ({ a: e.a, b: e.b, len: e.len })),
+      motors: state.motors.map(m => ({
+        anchor: m.anchor, node: m.node, speed: m.speed, theta0: m.theta0, radius: m.radius
+      }))
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.download = 'hinge_scene.json';
+    a.href = url;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  
+  function onImportFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const fr = new FileReader();
+    fr.onload = () => {
+      try {
+        const data = JSON.parse(fr.result);
+        loadFromData(data);
+      } catch (err) {
+        alert('Invalid JSON.');
+      }
+    };
+    fr.readAsText(file);
+    e.target.value = '';
+  }
+
+  function loadFromData(data) {
+    clearScene();
+    for (const n of (data.nodes || [])) {
+      addNode(n.x, n.y, { pinned: !!n.pinned, trace: !!n.trace });
+    }
+    for (const e of (data.edges || [])) {
+      // recalc len to current positions for robustness
+      addEdge(e.a, e.b);
+    }
+    // Reset edge lengths to provided lengths if any
+    if (data.edges) {
+      for (let i = 0; i < data.edges.length && i < state.edges.length; i++) {
+        if (typeof data.edges[i].len === 'number') state.edges[i].len = data.edges[i].len;
+      }
+    }
+    for (const m of (data.motors || [])) {
+      const idx = addMotor(m.anchor, m.node, m.speed);
+      if (idx != null) {
+        state.motors[idx].theta0 = m.theta0 ?? state.motors[idx].theta0;
+        state.motors[idx].radius = m.radius ?? state.motors[idx].radius;
+      }
+    }
+    autosave();
+  }
+  
+  function autosave() {
+    const data = {
+      nodes: state.nodes.map(n => ({ x:n.x, y:n.y, pinned:n.pinned, trace:n.trace })),
+      edges: state.edges.map(e => ({ a:e.a, b:e.b, len:e.len })),
+      motors: state.motors.map(m => ({ anchor:m.anchor, node:m.node, speed:m.speed, theta0:m.theta0, radius:m.radius })),
+    };
+    try {
+      localStorage.setItem('hinge-sim-data', JSON.stringify(data));
+    } catch {}
+  }
+
+  function autoload() {
+    try {
+      const raw = localStorage.getItem('hinge-sim-data');
+      if (raw) {
+        const data = JSON.parse(raw);
+        loadFromData(data);
+        return true;
+      }
+    } catch {}
+return false;
+  }
+  
+  // Sample four-bar linkage with motor
+  function loadSample() {
+    clearScene();
+    // Ground pins A and D
+    const A = addNode(-150, 0, { pinned: true });
+    const D = addNode(150, 0, { pinned: true });
+    // Crank point B around A
+    const B = addNode(-50, 0);
+    // Coupler C
+    const C = addNode(40, 80);
+
+    // Rods: AB, BC, CD, AD (ground)
+    addEdge(A, B); // AB
+    addEdge(B, C); // BC
+    addEdge(C, D); // CD
+    addEdge(A, D); // ground link to stabilize (optional as pins already fix ground)
+
+    // Motor: rotate B around A
+    addMotor(A, B, Math.PI / 2); // 90 deg/s
+    // Trace the coupler point C
+    state.nodes[C].trace = true;
+
+// Center view roughly
+    resetView();
+    autosave();
+  }
+
+  // Initialize
+  resetView();
+  setCanvasSize();
+  setTool('select');
+  if (!autoload()) {
+    loadSample();
+  }
+  updateStatus();
+  requestAnimationFrame(tick);
+})();
+  
+  </script>
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
